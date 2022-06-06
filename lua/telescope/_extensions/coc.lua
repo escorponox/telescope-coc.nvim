@@ -294,7 +294,6 @@ local references = function(opts)
     separator = '▏',
     items = {
       { width = 6 },
-      { width = 40 },
       { remaining = true },
     },
   })
