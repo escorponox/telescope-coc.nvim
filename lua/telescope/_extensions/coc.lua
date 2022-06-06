@@ -81,6 +81,17 @@ local mru = function(opts)
       results[#results + 1] = val:sub(#cwd + 1)
     end
   end
+
+  local make_display = function(text)
+    local display, hl_group = utils.transform_devicons(text, text)
+
+    if hl_group then
+      return display, { { { 1, 3 }, hl_group } }
+    else
+      return display
+    end
+  end
+
   pickers.new(opts, {
     prompt_title = 'Coc MRU',
     sorter = conf.generic_sorter(opts),
@@ -92,7 +103,7 @@ local mru = function(opts)
           valid = line ~= nil,
           value = line,
           ordinal = line,
-          display = line,
+          display = make_display(line),
         }
       end,
     }),
@@ -217,7 +228,7 @@ local function list_or_jump(opts)
   if vim.tbl_isempty(defs) then
     print(('No %s found'):format(opts.coc_action))
   elseif #defs == 1 then
-    vim.lsp.util.jump_to_location(defs[1])
+    CocActionAsync('runCommand', 'workspace.openLocation', nil, defs[1])
   else
     local results = locations_to_items(defs)
     if not results then
@@ -268,7 +279,8 @@ local references = function(opts)
     return
   end
 
-  local refs = CocAction('references')
+  local excludeDeclaration = opts.excludeDeclaration or false
+  local refs = CocAction('references', excludeDeclaration)
   if type(refs) ~= 'table' or vim.tbl_isempty(refs) then
     return
   end
@@ -278,17 +290,18 @@ local references = function(opts)
     return
   end
 
+  local displayer = entry_display.create({
+    separator = '▏',
+    items = {
+      { width = 6 },
+      { width = 40 },
+      { remaining = true },
+    },
+  })
+
   local make_display = function(entry)
     local line_info = { table.concat({ entry.lnum, entry.col }, ':'), 'TelescopeResultsLineNr' }
     local filename = utils.transform_path(opts, entry.filename)
-
-    local displayer = entry_display.create({
-      separator = '▏',
-      items = {
-        { width = 6 },
-        { remaining = true },
-      },
-    })
 
     return displayer({
       line_info,
@@ -318,6 +331,11 @@ local references = function(opts)
       end,
     }),
   }):find()
+end
+
+local references_used = function(opts)
+  opts.excludeDeclaration = true
+  references(opts)
 end
 
 local locations = function(opts)
@@ -430,6 +448,11 @@ local diagnostics = function(opts)
     end
   end
   for _, d in ipairs(diagnostics) do
+    if d.severity == 'Information' then
+      d.severity = 'Info'
+    elseif d.severity == 'Warning' then
+      d.severity = 'Warn'
+    end
     if opts.get_all or (d.file == current_filename) then
       results[#results + 1] = {
         bufnr = buf_names[d.file] or current_buf,
@@ -439,7 +462,7 @@ local diagnostics = function(opts)
         start = d.location.range.start,
         finish = d.location.range['end'],
         text = vim.trim(d.message:gsub('[\n]', '')),
-        type = d.severity,
+        type = d.severity:upper(),
       }
     end
   end
@@ -450,7 +473,7 @@ local diagnostics = function(opts)
     previewer = conf.qflist_previewer(opts),
     finder = finders.new_table({
       results = results,
-      entry_maker = opts.entry_maker or make_entry.gen_from_lsp_diagnostics(opts),
+      entry_maker = opts.entry_maker or make_entry.gen_from_diagnostics(opts),
     }),
     sorter = conf.prefilter_sorter({
       tag = 'type',
@@ -478,6 +501,38 @@ local commands = function(opts)
     return
   end
 
+  local results = {}
+
+  local ok, history = pcall(function()
+    return vim.split((Path:new(vim.fn['coc#util#get_data_home'](), 'commands'):read()), '\n')
+  end)
+  if ok then
+    local id2title = {}
+    for _, cmd in ipairs(cmds) do
+      id2title[cmd.id] = cmd.title
+    end
+
+    local exists = {}
+    for _, id in ipairs(history) do
+      if not exists[id] then
+        local title = id2title[id]
+        if title then
+          table.insert(results, { id = id, title = title })
+          exists[id] = true
+        end
+      end
+    end
+
+    for _, cmd in pairs(cmds) do
+      if not exists[cmd.id] then
+        table.insert(results, cmd)
+        exists[cmd.id] = true
+      end
+    end
+  else
+    results = cmds
+  end
+
   local displayer = entry_display.create({
     separator = ' ',
     items = {
@@ -496,7 +551,7 @@ local commands = function(opts)
     prompt_title = 'Coc Commands',
     sorter = conf.generic_sorter(opts),
     finder = finders.new_table({
-      results = cmds,
+      results = results,
       entry_maker = function(line)
         return {
           value = line.id,
@@ -518,13 +573,40 @@ local commands = function(opts)
   }):find()
 end
 
+local function subcommands(opts)
+  local cmds = require('telescope.command').get_extensions_subcommand().coc
+  cmds = vim.tbl_filter(function(v)
+    return v ~= 'coc'
+  end, cmds)
+
+  pickers.new(opts, {
+    prompt_title = 'Telescope Coc',
+    finder = finders.new_table({
+      results = cmds,
+    }),
+    sorter = conf.generic_sorter(opts),
+    attach_mappings = function(prompt_bufnr)
+      actions.select_default:replace(function()
+        local selection = action_state.get_selected_entry()
+        actions.close(prompt_bufnr)
+        vim.defer_fn(function()
+          require('telescope').extensions.coc[selection.value](opts)
+        end, 20)
+      end)
+      return true
+    end,
+  }):find()
+end
+
 return require('telescope').register_extension({
   exports = {
+    coc = subcommands,
     mru = mru,
     links = links,
     commands = commands,
     locations = locations,
     references = references,
+    references_used = references_used,
     diagnostics = diagnostics,
     definitions = definitions,
     declarations = declarations,
